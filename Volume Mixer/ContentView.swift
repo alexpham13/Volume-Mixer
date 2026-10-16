@@ -4,6 +4,10 @@ import CoreAudio
 
 struct ContentView: View {
     @State private var activeApps: [String] = []
+    @State private var audioTimer: Timer?
+    @State private var testVolume: Double = 0.5
+    @State private var appVolumes: [String: Double] = [:]
+    
     let systemObject = AudioObjectID(kAudioObjectSystemObject)
     
     func getAudioProcesses() {
@@ -83,7 +87,14 @@ struct ContentView: View {
                     if runningStatus == noErr {
                         if isRunning != 0 {
                             print("\(appName) - Audio process is running!")
-                            activeApps.append(appName)
+                            // Prevents duplicate app names from appearing in UI
+                            if !activeApps.contains(appName) {
+                                activeApps.append(appName)
+                                
+                                if appVolumes[appName] == nil {
+                                    appVolumes[appName] = 0.5
+                                }
+                            }
                         }
                     }
                 }
@@ -92,13 +103,44 @@ struct ContentView: View {
         } else {
                 print("Core Audio error: ", status)
             }
-        
     }
     var body: some View {
-        Text("Volume Mixer")
+        VStack {
+            Text("Volume Mixer")
+            
+            ForEach(activeApps, id: \.self) { appName in
+                HStack {
+                    Text(appName)
+                    Spacer()
+                    // Displays the app's curent slider value as percentage
+                    Text("\(Int((appVolumes[appName] ?? 0.5) * 100))%")
+                }
+                // Gives each app an independent slider
+                Slider(
+                    value: Binding(
+                        get: {
+                            appVolumes[appName] ?? 0.5
+                        },
+                        set: { newValue in
+                        appVolumes[appName] = newValue
+                        }
+                    ),
+                    in: 0...1
+                    )
+            }
+        }
+        .padding(20)
             // Finds audio processes that exist on Mac currently
             .onAppear {
                 getAudioProcesses()
+                
+                audioTimer?.invalidate()
+                audioTimer = Timer.scheduledTimer(withTimeInterval: 2.0,repeats: true) { _ in getAudioProcesses()
+                }
+            }
+            .onDisappear {
+                audioTimer?.invalidate()
+                audioTimer = nil
             }
     }
     }
