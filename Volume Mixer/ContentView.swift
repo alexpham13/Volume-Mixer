@@ -105,28 +105,32 @@ struct ContentView: View {
             }
     }
     var body: some View {
-        VStack {
+        VStack(spacing: 20) {
             Text("Volume Mixer")
+                .font(.title2)
+                .fontWeight(.bold)
             
             ForEach(activeApps, id: \.self) { appName in
-                HStack {
-                    Text(appName)
-                    Spacer()
-                    // Displays the app's curent slider value as percentage
-                    Text("\(Int((appVolumes[appName] ?? 0.5) * 100))%")
-                }
-                // Gives each app an independent slider
-                Slider(
-                    value: Binding(
-                        get: {
-                            appVolumes[appName] ?? 0.5
-                        },
-                        set: { newValue in
-                        appVolumes[appName] = newValue
-                        }
-                    ),
-                    in: 0...1
+                VStack(spacing: 8) {
+                    HStack {
+                        Text(appName)
+                        Spacer()
+                        // Displays the app's curent slider value as percentage
+                        Text("\(Int((appVolumes[appName] ?? 0.5) * 100))%")
+                    }
+                    // Gives each app an independent slider
+                    Slider(
+                        value: Binding(
+                            get: {
+                                appVolumes[appName] ?? 0.5
+                            },
+                            set: { newValue in
+                                appVolumes[appName] = newValue
+                            }
+                        ),
+                        in: 0...1
                     )
+                }
             }
         }
         .padding(20)
