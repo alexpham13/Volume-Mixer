@@ -3,13 +3,17 @@ import CoreAudio
 import AppKit
 
 //Manages core audio functionality separately from UI
+@Observable
 class AudioManager {
     let systemObject = AudioObjectID(kAudioObjectSystemObject)
     var activeApps: [String] = []
     var appVolumes: [String: Double] = [:]
+    // Maps application names to their Core Audio process IDs
+    var appProcessIDs: [String: [AudioObjectID]] = [:]
     
     func getAudioProcesses() {
         activeApps.removeAll()
+        appProcessIDs.removeAll()
         
         // Specifies which information we need
         var address = AudioObjectPropertyAddress(
@@ -85,6 +89,11 @@ class AudioManager {
                     if runningStatus == noErr {
                         if isRunning != 0 {
                             print("\(appName) - Audio process is running!")
+                            
+                            // Stores each running audio process ID in its app's array
+                            appProcessIDs[appName, default: []].append(processId)
+                            print ("\(appName): \(appProcessIDs[appName] ?? [])")
+                            
                             // Prevents duplicate app names from appearing in UI
                             if !activeApps.contains(appName) {
                                 activeApps.append(appName)
@@ -101,6 +110,19 @@ class AudioManager {
         } else {
                 print("Core Audio error: ", status)
             }
+    }
+    func exploreProcessTaps(for appName: String) {
+        // Retrieves Spotify's detected Core Audio process IDs
+        guard let processIDs = appProcessIDs[appName],
+              !processIDs.isEmpty else{
+            print("\(appName) audio process not found")
+            return
+        }
+        // Describes a tap that captures audio from the selected processes
+        let tapDescription = CATapDescription(
+            stereoMixdownOfProcesses: processIDs
+        )
+        print (tapDescription)
     }
     
 }
