@@ -123,6 +123,22 @@ class AudioManager {
             stereoMixdownOfProcesses: processIDs
         )
         print (tapDescription)
+        
+        // Stores the Core Audio object ID assigned to our new process tap
+        var tapID: AudioObjectID = 0
+        // Request core audio to create a process tap
+        let status = AudioHardwareCreateProcessTap(tapDescription, &tapID)
+        
+        if status == noErr {
+            print("Process tap created successfully! ID: \(tapID)")
+            
+            // Releases the process tap after initial test
+            let destroyStatus = AudioHardwareDestroyProcessTap(tapID)
+            print("Tap cleanup status: \(destroyStatus)")
+            
+        } else {
+            print("Failed to create process tap. Error: \(status)")
+        }
     }
     
 }
