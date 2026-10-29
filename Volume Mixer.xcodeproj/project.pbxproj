@@ -6,8 +6,13 @@
 	objectVersion = 90;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		64BE12943093C2C100C06FA8 /* ProcessAudioEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64BE12933093C2C100C06FA8 /* ProcessAudioEngine.swift */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		000000000000000000000120 /* Volume Mixer.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Volume Mixer.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		64BE12933093C2C100C06FA8 /* ProcessAudioEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProcessAudioEngine.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -30,6 +35,7 @@
 		000000000000000000000001 = {
 			isa = PBXGroup;
 			children = (
+				64BE12933093C2C100C06FA8 /* ProcessAudioEngine.swift */,
 				000000000000000000000010 /* Volume Mixer */,
 				000000000000000000000020 /* Products */,
 			);
@@ -110,6 +116,7 @@
 		000000000000000120000000 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			files = (
+				64BE12943093C2C100C06FA8 /* ProcessAudioEngine.swift in Sources */,
 			);
 		};
 /* End PBXSourcesBuildPhase section */

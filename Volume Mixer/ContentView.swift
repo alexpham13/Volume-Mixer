@@ -39,7 +39,6 @@ struct ContentView: View {
             .onAppear {
                 audioManager.getAudioProcesses()
                 // Tests creating and immediately destroys process tap
-                audioManager.exploreProcessTaps(for: "Spotify")
                 
                 audioTimer?.invalidate()
                 audioTimer = Timer.scheduledTimer(withTimeInterval: 2.0,repeats: true) { _ in audioManager.getAudioProcesses()
