@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ContentView: View {
     @State private var audioManager = AudioManager()
+    @State private var audioEngine = ProcessAudioEngine()
     @State private var audioTimer: Timer?
     @State private var testVolume: Double = 0.5
         
@@ -38,15 +39,31 @@ struct ContentView: View {
             // Finds audio processes that exist on Mac currently
             .onAppear {
                 audioManager.getAudioProcesses()
-                // Tests creating and immediately destroys process tap
+                // Tests capturing Spotify's audio using Core Audio process IDs
+                if let spotifyIDs = audioManager.appProcessIDs["Spotify"] {
+                    do {
+                        try audioEngine.start(processIDs: spotifyIDs)
+                        print("Spotify capture engine started successfully!")
+                    } catch {
+                        print("Spotify capture failed: \(error)")
+                    }
+                } else {
+                    print("Spotify audio process not detected")
+                }
                 
                 audioTimer?.invalidate()
                 audioTimer = Timer.scheduledTimer(withTimeInterval: 2.0,repeats: true) { _ in audioManager.getAudioProcesses()
+                    
+                    // Checks how many audio callbacks our engine has received
+                    print("Audio callbacks received: \(audioEngine.getCallbackCount())")
                 }
             }
             .onDisappear {
                 audioTimer?.invalidate()
                 audioTimer = nil
+                
+                // Stops audio capture and releases Core Audio resources
+                audioEngine.stop()
             }
     }
     }

@@ -2,6 +2,7 @@
 import Foundation
 import CoreAudio
 import AudioToolbox
+import os
 
 final class ProcessAudioEngine {
 
@@ -19,6 +20,9 @@ final class ProcessAudioEngine {
 
     // Tracks if audio engine is currently running
     private(set) var isRunning = false
+    
+    // Counts how many times Core Audio delivers audio buffers
+    private let callbackCount = OSAllocatedUnfairLock(initialState: 0)
 
     // Controls the gain we eventually apply to captured samples
     // This is not connected to audible output yet
@@ -154,11 +158,18 @@ final class ProcessAudioEngine {
             let buffers = UnsafeMutableAudioBufferListPointer(
                 UnsafeMutablePointer(mutating: inputData)
             )
+            
+            self.callbackCount.withLock { count in
+                count += 1
+            }
 
             for buffer in buffers {
-                // This verifies that audio buffers are being delivered
-                // Do not print continuously inside a real-time audio callback
-                _ = buffer.mDataByteSize
+                // Checks whether Core Audio provided actual audio data
+                if buffer.mDataByteSize > 0 && buffer.mData != nil {
+                    // Counts the number of bytes received from the audio tap
+                    // Avoids printing continuously inside the audio callback
+                    _ = buffer.mDataByteSize
+                }
             }
         }
 
@@ -204,6 +215,11 @@ final class ProcessAudioEngine {
         isRunning = false
 
         print("Audio capture engine stopped")
+    }
+    
+    // Returns the number of audio callbacks received
+    func getCallbackCount() -> Int {
+        callbackCount.withLock { $0 }
     }
 
     deinit {
