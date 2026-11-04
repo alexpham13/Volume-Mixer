@@ -41,7 +41,9 @@ final class ProcessAudioEngine {
         do {
             try createTap()
             try createAggregateDevice()
+            try inspectAudioFormat()
             try startAudioCallback()
+            
             isRunning = true
             print("Audio capture engine started")
         } catch {
@@ -140,6 +142,41 @@ final class ProcessAudioEngine {
 
         print("Created aggregate device: \(aggregateDeviceID)")
     }
+    // Inspects the audio format provided by the process tap
+    private func inspectAudioFormat() throws {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioTapPropertyFormat,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+
+        var format = AudioStreamBasicDescription()
+        var dataSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+
+        let status = AudioObjectGetPropertyData(
+            tapID,
+            &address,
+            0,
+            nil,
+            &dataSize,
+            &format
+        )
+
+        guard status == noErr else {
+            throw AudioEngineError.coreAudioFailure(
+                operation: "Read audio format",
+                status: status
+            )
+        }
+
+        print("Sample rate: \(format.mSampleRate)")
+        print("Channels: \(format.mChannelsPerFrame)")
+        print("Bits per channel: \(format.mBitsPerChannel)")
+        print("Format flags: \(format.mFormatFlags)")
+        print("Bytes per frame: \(format.mBytesPerFrame)")
+        print("Format ID: \(format.mFormatID)")
+        print("Frames per packet: \(format.mFramesPerPacket)")
+    }
 
     // Registers callback that Core Audio uses with captured audio buffers
     private func startAudioCallback() throws {
@@ -152,8 +189,6 @@ final class ProcessAudioEngine {
             aggregateDeviceID,
             DispatchQueue(label: "com.volumemixer.audio", qos: .userInteractive)
         ) { _, inputData, _, _, _ in
-
-            // The input buffers contain captured audio samples
             // This callback should not perform UI updates or heavy work
             let buffers = UnsafeMutableAudioBufferListPointer(
                 UnsafeMutablePointer(mutating: inputData)
@@ -165,11 +200,28 @@ final class ProcessAudioEngine {
 
             for buffer in buffers {
                 // Checks whether Core Audio provided actual audio data
-                if buffer.mDataByteSize > 0 && buffer.mData != nil {
-                    // Counts the number of bytes received from the audio tap
-                    // Avoids printing continuously inside the audio callback
-                    _ = buffer.mDataByteSize
+                guard let data = buffer.mData,
+                      buffer.mDataByteSize > 0 else {
+                    continue
                 }
+
+                // Each sample is a 32-bit floating-point number
+                let sampleCount = Int(buffer.mDataByteSize) / MemoryLayout<Float>.size
+
+                guard sampleCount > 0 else { continue }
+
+                let samples = data.assumingMemoryBound(to: Float.self)
+
+                // Calculate the signal's root mean square (RMS)
+                var sumOfSquares: Double = 0
+
+                for index in 0..<sampleCount {
+                    let sample = Double(samples[index])
+                    sumOfSquares += sample * sample
+                }
+
+                let rms = sqrt(sumOfSquares / Double(sampleCount))
+                
             }
         }
 

@@ -142,6 +142,7 @@ final class AudioManager {
 
                         if isRunning != 0 {
                             print("\(appName) - Audio process is running!")
+                            print("App: \(appName) | macOS PID: \(pid) | Core Audio ID: \(processId)")
 
                             // Stores each running audio process ID in its app's array
                             discoveredApps[appName, default: []].append(processId)
