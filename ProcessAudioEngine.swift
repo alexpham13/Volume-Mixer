@@ -1,301 +1,147 @@
-
 import Foundation
 import CoreAudio
 import AudioToolbox
-import os
 
+// Owned by the serial control queue. The real-time IOProc only sees MixerDSP.
 final class ProcessAudioEngine {
-
     // Stores Core Audio process tap assigned to this engine
     private var tapID: AudioObjectID = 0
-
     // Stores the aggregate device used to access captured audio
     private var aggregateDeviceID: AudioObjectID = 0
-
-    // Stores audio callback connected with Core Audio
     private var ioProcID: AudioDeviceIOProcID?
+    private var dsp: OpaquePointer?
+    let processes: [AudioObjectID]
+    let route: OutputRoute
+    let rendering: Bool
+    let started = ProcessInfo.processInfo.systemUptime
+    var lastCalls: UInt32 = 0
+    var lastCallbackTime = ProcessInfo.processInfo.systemUptime
+    var meter: MixerMeter { dsp.map { MixerRead($0) } ?? MixerMeter() }
 
-    // Stores Core Audio process IDs that engine captures
-    private var processIDs: [AudioObjectID] = []
-
-    // Tracks if audio engine is currently running
-    private(set) var isRunning = false
-    
-    // Counts how many times Core Audio delivers audio buffers
-    private let callbackCount = OSAllocatedUnfairLock(initialState: 0)
-
-    // Controls the gain we eventually apply to captured samples
-    // This is not connected to audible output yet
-    private var volume: Float = 1.0
-
-    // Starts capturing audio from the supplied application processes
-    func start(processIDs: [AudioObjectID]) throws {
-        guard !isRunning else { return }
-
-        guard !processIDs.isEmpty else {
-            throw AudioEngineError.noProcesses
-        }
-
-        self.processIDs = processIDs
-
-        do {
-            try createTap()
-            try createAggregateDevice()
-            try inspectAudioFormat()
-            try startAudioCallback()
-            
-            isRunning = true
-            print("Audio capture engine started")
-        } catch {
-            stop()
-            throw error
-        }
+    init(processes: [AudioObjectID], route: OutputRoute, rendering: Bool) {
+        self.processes = processes
+        self.route = route
+        self.rendering = rendering
     }
 
-    // Updates volume value used by our future processing pipeline
-    func setVolume(_ value: Float) {
-        volume = min(max(value, 0), 1)
+    func setVolume(_ gain: Float) {
+        if let dsp { MixerGain(dsp, gain) }
     }
 
-    // Creates tap that captures audio from selected processes
-    private func createTap() throws {
-        let description = CATapDescription(
-            stereoMixdownOfProcesses: processIDs
-        )
-
-        // Leave the application's normal playback unchanged during capture testing
-        description.muteBehavior = .unmuted
-
-        let status = AudioHardwareCreateProcessTap(
-            description,
-            &tapID
-        )
-
-        guard status == noErr else {
-            throw AudioEngineError.coreAudioFailure(
-                operation: "Create process tap",
-                status: status
-            )
-        }
-
-        print("Created process tap: \(tapID)")
-    }
-
-    private func createAggregateDevice() throws {
-        guard tapID != 0 else {
-            throw AudioEngineError.noTap
-        }
-
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioTapPropertyUID,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-
-        var tapUID: CFString = "" as CFString
-        var dataSize = UInt32(MemoryLayout<CFString>.size)
-
-        let uidStatus = withUnsafeMutablePointer(to: &tapUID) { pointer in
-            AudioObjectGetPropertyData(
-                tapID,
-                &address,
-                0,
-                nil,
-                &dataSize,
-                pointer
-            )
-        }
-
-        guard uidStatus == noErr else {
-            throw AudioEngineError.coreAudioFailure(
-                operation: "Read tap UID",
-                status: uidStatus
-            )
-        }
-
-        let aggregateUID = UUID().uuidString
-
-        let description: [String: Any] = [
-            kAudioAggregateDeviceNameKey: "Volume Mixer Capture",
-            kAudioAggregateDeviceUIDKey: aggregateUID,
+    func start(gain: Float) throws {
+        let tap = CATapDescription(processes: processes, deviceUID: route.uid, stream: 0)
+        tap.name = "Volume Mixer"
+        tap.isPrivate = true
+        tap.muteBehavior = rendering ? .mutedWhenTapped : .unmuted
+        try HAL.check(AudioHardwareCreateProcessTap(tap, &tapID), "Create process tap")
+        let uid = try HAL.string(tapID, kAudioTapPropertyUID)
+        let composition: [String: Any] = [
+            kAudioAggregateDeviceUIDKey: UUID().uuidString,
+            kAudioAggregateDeviceNameKey: "Volume Mixer • \(route.name)",
             kAudioAggregateDeviceIsPrivateKey: true,
             kAudioAggregateDeviceIsStackedKey: false,
-            kAudioAggregateDeviceTapListKey: [
-                [
-                    kAudioSubTapUIDKey: tapUID,
-                    kAudioSubTapDriftCompensationKey: true
-                ]
-            ]
+            kAudioAggregateDeviceTapAutoStartKey: true,
+            kAudioAggregateDeviceMainSubDeviceKey: route.uid,
+            kAudioAggregateDeviceSubDeviceListKey: [[kAudioSubDeviceUIDKey: route.uid]],
+            kAudioAggregateDeviceTapListKey: [[kAudioSubTapUIDKey: uid, kAudioSubTapDriftCompensationKey: true]]
         ]
-
-        let status = AudioHardwareCreateAggregateDevice(
-            description as CFDictionary,
-            &aggregateDeviceID
-        )
-
-        guard status == noErr else {
-            throw AudioEngineError.coreAudioFailure(
-                operation: "Create aggregate device",
-                status: status
-            )
-        }
-
-        print("Created aggregate device: \(aggregateDeviceID)")
-    }
-    // Inspects the audio format provided by the process tap
-    private func inspectAudioFormat() throws {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioTapPropertyFormat,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-
-        var format = AudioStreamBasicDescription()
-        var dataSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
-
-        let status = AudioObjectGetPropertyData(
-            tapID,
-            &address,
-            0,
-            nil,
-            &dataSize,
-            &format
-        )
-
-        guard status == noErr else {
-            throw AudioEngineError.coreAudioFailure(
-                operation: "Read audio format",
-                status: status
-            )
-        }
-
-        print("Sample rate: \(format.mSampleRate)")
-        print("Channels: \(format.mChannelsPerFrame)")
-        print("Bits per channel: \(format.mBitsPerChannel)")
-        print("Format flags: \(format.mFormatFlags)")
-        print("Bytes per frame: \(format.mBytesPerFrame)")
-        print("Format ID: \(format.mFormatID)")
-        print("Frames per packet: \(format.mFramesPerPacket)")
-    }
-
-    // Registers callback that Core Audio uses with captured audio buffers
-    private func startAudioCallback() throws {
-        guard aggregateDeviceID != 0 else {
-            throw AudioEngineError.noAggregateDevice
-        }
-
-        let status = AudioDeviceCreateIOProcIDWithBlock(
-            &ioProcID,
-            aggregateDeviceID,
-            DispatchQueue(label: "com.volumemixer.audio", qos: .userInteractive)
-        ) { _, inputData, _, _, _ in
-            // This callback should not perform UI updates or heavy work
-            let buffers = UnsafeMutableAudioBufferListPointer(
-                UnsafeMutablePointer(mutating: inputData)
-            )
-            
-            self.callbackCount.withLock { count in
-                count += 1
+        try HAL.check(AudioHardwareCreateAggregateDevice(composition as CFDictionary, &aggregateDeviceID),
+                      "Create private aggregate")
+        // HAL publishes aggregate streams asynchronously. Wait off the UI thread.
+        let deadline = ProcessInfo.processInfo.systemUptime + 2
+        var layout: (UInt32, UInt32, UInt32, UInt32, UInt32)?
+        var reason = "Waiting for aggregate device."
+        repeat {
+            do {
+                layout = try inspectLayout()
+                break
+            } catch {
+                reason = error.localizedDescription
+                Thread.sleep(forTimeInterval: 0.05)
             }
+        } while ProcessInfo.processInfo.systemUptime < deadline
+        guard let (offset, inputs, outputs, physicalStreams, totalStreams) = layout else { throw MixerError(reason) }
+        guard let state = MixerCreate(offset, inputs, route.channels, outputs, gain, route.rate, rendering)
+        else { throw MixerError("Could not allocate render state.") }
+        dsp = state
+        try HAL.check(
+            AudioDeviceCreateIOProcID(
+                aggregateDeviceID,
+                { device, now, input, inputTime, output, outputTime, context in
+                    return MixerIO(
+                        device,
+                        now,
+                        input,
+                        inputTime,
+                        output,
+                        outputTime,
+                        context
+                    )
+                },
+                UnsafeMutableRawPointer(state),
+                &ioProcID
+            ),
+            "Register audio callback"
+        )
+        guard let ioProcID else { throw MixerError("Missing IOProc.") }
+        try HAL.check(MixerDisableHardwareInputs(aggregateDeviceID, ioProcID, physicalStreams, totalStreams),
+                      "Disable hardware inputs")
+        try HAL.check(AudioDeviceStart(aggregateDeviceID, ioProcID), "Start audio device")
+    }
 
-            for buffer in buffers {
-                // Checks whether Core Audio provided actual audio data
-                guard let data = buffer.mData,
-                      buffer.mDataByteSize > 0 else {
-                    continue
-                }
-
-                // Each sample is a 32-bit floating-point number
-                let sampleCount = Int(buffer.mDataByteSize) / MemoryLayout<Float>.size
-
-                guard sampleCount > 0 else { continue }
-
-                let samples = data.assumingMemoryBound(to: Float.self)
-
-                // Calculate the signal's root mean square (RMS)
-                var sumOfSquares: Double = 0
-
-                for index in 0..<sampleCount {
-                    let sample = Double(samples[index])
-                    sumOfSquares += sample * sample
-                }
-
-                let rms = sqrt(sumOfSquares / Double(sampleCount))
-                
+    private func inspectLayout() throws -> (UInt32, UInt32, UInt32, UInt32, UInt32) {
+        let input = kAudioObjectPropertyScopeInput, output = kAudioObjectPropertyScopeOutput
+        let alive = try HAL.read(aggregateDeviceID, kAudioDevicePropertyDeviceIsAlive, UInt32(0))
+        let physical = try HAL.ids(route.id, kAudioDevicePropertyStreams, scope: input)
+        let ins = try HAL.ids(aggregateDeviceID, kAudioDevicePropertyStreams, scope: input)
+        let outs = try HAL.ids(aggregateDeviceID, kAudioDevicePropertyStreams, scope: output)
+        guard alive != 0, ins.count == physical.count + 1, let stream = ins.last, outs.count == 1 else {
+            throw MixerError("Aggregate streams unavailable or unsupported.")
+        }
+        let formats = try [HAL.read(tapID, kAudioTapPropertyFormat, AudioStreamBasicDescription()),
+                           HAL.read(stream, kAudioStreamPropertyVirtualFormat, AudioStreamBasicDescription()),
+                           HAL.read(outs[0], kAudioStreamPropertyVirtualFormat, AudioStreamBasicDescription())]
+        for f in formats {
+            let flags = f.mFormatFlags
+            let planar = flags & kAudioFormatFlagIsNonInterleaved != 0
+            guard f.mFormatID == kAudioFormatLinearPCM, flags & kAudioFormatFlagIsFloat != 0,
+                  flags & kAudioFormatFlagIsBigEndian == 0, f.mBitsPerChannel == 32,
+                  (1...2).contains(route.channels), f.mChannelsPerFrame == route.channels,
+                  f.mBytesPerFrame == 4 * (planar ? 1 : route.channels),
+                  route.rate > 0, f.mSampleRate == route.rate else {
+                throw MixerError("Requires matching mono/stereo Float32 streams. Found \(f.mSampleRate) Hz, \(f.mChannelsPerFrame) ch, flags \(flags).")
             }
         }
-
-        guard status == noErr else {
-            throw AudioEngineError.coreAudioFailure(
-                operation: "Create audio callback",
-                status: status
-            )
-        }
-
-        let startStatus = AudioDeviceStart(
-            aggregateDeviceID,
-            ioProcID
-        )
-
-        guard startStatus == noErr else {
-            throw AudioEngineError.coreAudioFailure(
-                operation: "Start audio device",
-                status: startStatus
-            )
-        }
+        let offset = MixerBufferCount(route.id, input)
+        let count = MixerBufferCount(aggregateDeviceID, input) - offset
+        let out = MixerBufferCount(aggregateDeviceID, output)
+        guard offset >= 0, count == 1 || count == Int32(route.channels),
+              out == 1 || out == Int32(route.channels) else { throw MixerError("Unsupported aggregate buffer layout.") }
+        return (UInt32(offset), UInt32(count), UInt32(out), UInt32(physical.count), UInt32(ins.count))
     }
 
-    // Stops audio capture and releases Core Audio resources
+    // Stops audio capture and releases Core Audio resources in reverse order.
     func stop() {
-        if aggregateDeviceID != 0 {
-            if let ioProcID {
-                AudioDeviceStop(aggregateDeviceID, ioProcID)
-                AudioDeviceDestroyIOProcID(aggregateDeviceID, ioProcID)
-                self.ioProcID = nil
+        if let ioProcID {
+            AudioDeviceStop(aggregateDeviceID, ioProcID)
+            let status = AudioDeviceDestroyIOProcID(aggregateDeviceID, ioProcID)
+            if status != noErr {
+                // Retain callback storage until aggregate destruction invalidates the IOProc.
+                NSLog("Volume Mixer: destroy IOProc returned %d", status)
             }
-
-            AudioHardwareDestroyAggregateDevice(aggregateDeviceID)
-            aggregateDeviceID = 0
+            if status == noErr { self.ioProcID = nil }
         }
-
+        if aggregateDeviceID != 0 {
+            let status = AudioHardwareDestroyAggregateDevice(aggregateDeviceID)
+            if status == noErr { aggregateDeviceID = 0; ioProcID = nil }
+            else { NSLog("Volume Mixer: destroy aggregate returned %d", status) }
+        }
+        if ioProcID == nil, let dsp { MixerFree(dsp); self.dsp = nil }
         if tapID != 0 {
-            AudioHardwareDestroyProcessTap(tapID)
-            tapID = 0
-        }
-
-        processIDs.removeAll()
-        isRunning = false
-
-        print("Audio capture engine stopped")
-    }
-    
-    // Returns the number of audio callbacks received
-    func getCallbackCount() -> Int {
-        callbackCount.withLock { $0 }
-    }
-
-    deinit {
-        stop()
-    }
-}
-
-// Describes errors encountered while configuring Core Audio
-enum AudioEngineError: LocalizedError {
-    case noProcesses
-    case noTap
-    case noAggregateDevice
-    case coreAudioFailure(operation: String, status: OSStatus)
-
-    var errorDescription: String? {
-        switch self {
-        case .noProcesses:
-            return "No audio processes were provided."
-        case .noTap:
-            return "A process tap has not been created."
-        case .noAggregateDevice:
-            return "An aggregate audio device has not been created."
-        case let .coreAudioFailure(operation, status):
-            return "\(operation) failed with Core Audio status \(status)."
+            let status = AudioHardwareDestroyProcessTap(tapID)
+            if status == noErr { tapID = 0 }
+            else { NSLog("Volume Mixer: destroy tap returned %d", status) }
         }
     }
+    deinit { stop() }
 }
